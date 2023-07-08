@@ -1,14 +1,15 @@
-import { createError } from '../errors.js'
-import { ISorter, OpaqueSorter, Orama, Schema, SorterConfig, SorterParams, SortType, SortValue } from '../types.js'
+import { DocumentID, getInternalDocumentId, InternalDocumentID } from "../document-id.js";
+import { createError } from "../errors.js";
+import { ISorter, OpaqueSorter, Orama, Schema, SorterConfig, SorterParams, SortType, SortValue } from "../types.js";
 
 interface PropertySort<K> {
-  docs: Map<string, number>
-  orderedDocs: [string, K][]
-  orderedDocsToRemove: Map<string, boolean>
+  docs: Map<InternalDocumentID, number>;
+  orderedDocs: [InternalDocumentID, K][]
+  orderedDocsToRemove: Map<InternalDocumentID, boolean>
   type: SortType
 }
 
-type SerializablePropertySort<K> = Omit<PropertySort<K>, 'orderedDocsToRemove' | 'docs'> & { docs: Record<string, number> } ;
+type SerializablePropertySort<K> = Omit<PropertySort<K>, 'orderedDocsToRemove' | 'docs'> & { docs: Record<InternalDocumentID, number> } ;
 
 export interface Sorter extends OpaqueSorter {
   language?: string
@@ -107,8 +108,9 @@ async function insert(
 
   const s = sorter.sorts[prop]
 
-  s.docs.set(id, s.orderedDocs.length);
-  s.orderedDocs.push([id, value]);
+  const internalId = getInternalDocumentId(id);
+  s.docs.set(internalId, s.orderedDocs.length);
+  s.orderedDocs.push([internalId, value]);
 }
 
 function ensureIsSorted(sorter: Sorter): void {
@@ -128,22 +130,22 @@ function ensureIsSorted(sorter: Sorter): void {
   sorter.isSorted = true;
 }
 
-function stringSort(language: string | undefined, value: [string, SortValue], d: [string, SortValue]): number {
+function stringSort(language: string | undefined, value: [InternalDocumentID, SortValue], d: [InternalDocumentID, SortValue]): number {
   return (value[1] as string).localeCompare(d[1] as string, language)
 }
 
-function numerSort(value: [string, SortValue], d: [string, SortValue]): number {
+function numerSort(value: [InternalDocumentID, SortValue], d: [InternalDocumentID, SortValue]): number {
   return (value[1] as number) - (d[1] as number)
 }
 
-function booleanSort(value: [string, SortValue], d: [string, SortValue]): number {
+function booleanSort(value: [InternalDocumentID, SortValue], d: [InternalDocumentID, SortValue]): number {
   return d[1] as boolean ? -1 : 1
 }
 
 function ensurePropertyIsSorted(sorter: Sorter, prop: string): void {
   const s = sorter.sorts[prop];
 
-  let predicate: (value: [string, SortValue], d: [string, SortValue]) => number
+  let predicate: (value: [InternalDocumentID, SortValue], d: [InternalDocumentID, SortValue]) => number
   switch (s.type) {
     case 'string':
       predicate = stringSort.bind(null, sorter.language)
@@ -183,22 +185,23 @@ function ensureOrderedDocsAreDeletedByProperty(sorter: Sorter, prop: string): vo
   s.orderedDocsToRemove.clear()
 }
 
-async function remove(sorter: Sorter, prop: string, id: string) {
+async function remove(sorter: Sorter, prop: string, id: DocumentID) {
   if (!sorter.enabled) {
     return
   }
-  const s = sorter.sorts[prop] as PropertySort<SortValue>
+  const s = sorter.sorts[prop] as PropertySort<SortValue>;
+  const internalId = getInternalDocumentId(id);
 
-  const index = s.docs.get(id)
+  const index = s.docs.get(internalId)
 
   if (!index)
     return
 
-  s.docs.delete(id)
-  s.orderedDocsToRemove.set(id, true)
+  s.docs.delete(internalId)
+  s.orderedDocsToRemove.set(internalId, true)
 }
 
-async function sortBy(sorter: Sorter, docIds: [string, number][], by: SorterParams): Promise<[string, number][]> {
+async function sortBy(sorter: Sorter, docIds: [InternalDocumentID, number][], by: SorterParams): Promise<[InternalDocumentID, number][]> {
   if (!sorter.enabled) {
     throw createError('SORT_DISABLED')
   }
