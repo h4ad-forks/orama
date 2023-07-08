@@ -1,4 +1,4 @@
-import { DocumentID, getInternalDocumentId, InternalDocumentID } from "../document-id.js";
+import { InternalDocumentStore, getInternalDocumentId, InternalDocumentID, InternalDocumentIDStore } from "./internal-document-store.js";
 import { createError } from "../errors.js";
 import { ISorter, OpaqueSorter, Orama, Schema, SorterConfig, SorterParams, SortType, SortValue } from "../types.js";
 
@@ -12,6 +12,7 @@ interface PropertySort<K> {
 type SerializablePropertySort<K> = Omit<PropertySort<K>, 'orderedDocsToRemove' | 'docs'> & { docs: Record<InternalDocumentID, number> } ;
 
 export interface Sorter extends OpaqueSorter {
+  sharedInternalDocumentStore: InternalDocumentIDStore;
   language?: string
   isSorted: boolean
   enabled: boolean
@@ -22,8 +23,9 @@ export interface Sorter extends OpaqueSorter {
 
 export type DefaultSorter = ISorter<Sorter>
 
-function innerCreate(schema: Schema, sortableDeniedProperties: string[], prefix: string): Sorter {
+function innerCreate(orama: Orama, schema: Schema, sortableDeniedProperties: string[], prefix: string): Sorter {
   const sorter: Sorter = {
+    sharedInternalDocumentStore: orama.internalDocumentStore,
     enabled: true,
     isSorted: true,
     language: undefined,
@@ -42,7 +44,7 @@ function innerCreate(schema: Schema, sortableDeniedProperties: string[], prefix:
 
     if (typeActualType === 'object' && !Array.isArray(type)) {
       // Nested
-      const ret = innerCreate(type as Schema, sortableDeniedProperties, path)
+      const ret = innerCreate(orama, type as Schema, sortableDeniedProperties, path)
       sorter.sortableProperties.push(...ret.sortableProperties)
       sorter.sorts = {
         ...sorter.sorts,
@@ -81,14 +83,14 @@ function innerCreate(schema: Schema, sortableDeniedProperties: string[], prefix:
   return sorter
 }
 
-async function create(_: Orama, schema: Schema, config?: SorterConfig): Promise<Sorter> {
+async function create(orama: Orama, schema: Schema, config?: SorterConfig): Promise<Sorter> {
   const isSortEnabled = config?.enabled !== false
   if (!isSortEnabled) {
     return {
       disabled: true,
     } as unknown as Sorter
   }
-  return innerCreate(schema, (config || {}).unsortableProperties || [], '')
+  return innerCreate(orama, schema, (config || {}).unsortableProperties || [], '')
 }
 
 async function insert(
@@ -108,7 +110,7 @@ async function insert(
 
   const s = sorter.sorts[prop]
 
-  const internalId = getInternalDocumentId(id);
+  const internalId = getInternalDocumentId(sorter.sharedInternalDocumentStore, id);
   s.docs.set(internalId, s.orderedDocs.length);
   s.orderedDocs.push([internalId, value]);
 }
@@ -185,12 +187,12 @@ function ensureOrderedDocsAreDeletedByProperty(sorter: Sorter, prop: string): vo
   s.orderedDocsToRemove.clear()
 }
 
-async function remove(sorter: Sorter, prop: string, id: DocumentID) {
+async function remove(sorter: Sorter, prop: string, id: InternalDocumentStore) {
   if (!sorter.enabled) {
     return
   }
   const s = sorter.sorts[prop] as PropertySort<SortValue>;
-  const internalId = getInternalDocumentId(id);
+  const internalId = getInternalDocumentId(sorter.sharedInternalDocumentStore, id);
 
   const index = s.docs.get(internalId)
 
@@ -259,7 +261,7 @@ async function getSortablePropertiesWithTypes(sorter: Sorter): Promise<Record<st
   return sorter.sortablePropertiesWithTypes
 }
 
-export async function load<R = unknown>(raw: R): Promise<Sorter> {
+export async function load<R = unknown>(sharedInternalDocumentStore: InternalDocumentIDStore, raw: R): Promise<Sorter> {
   const rawDocument = raw as Omit<Sorter, 'sorts'> & { sorts: Record<string, SerializablePropertySort<string | number | boolean>> }
   if (!rawDocument.enabled) {
     return {
@@ -271,7 +273,7 @@ export async function load<R = unknown>(raw: R): Promise<Sorter> {
     const { docs, orderedDocs, type } = rawDocument.sorts[prop];
 
     acc[prop] = {
-      docs: new Map(Object.entries(docs)),
+      docs: new Map(Object.entries(docs).map(([id, v]) => [+id, v])),
       orderedDocsToRemove: new Map(),
       orderedDocs,
       type,
@@ -281,6 +283,7 @@ export async function load<R = unknown>(raw: R): Promise<Sorter> {
   }, {} as Record<string, PropertySort<string | number | boolean>>);
 
   return {
+    sharedInternalDocumentStore,
     sortableProperties: rawDocument.sortableProperties,
     sortablePropertiesWithTypes: rawDocument.sortablePropertiesWithTypes,
     sorts,
@@ -322,13 +325,13 @@ export async function save<R = unknown>(sorter: Sorter): Promise<R> {
   } as R
 }
 
-export async function createSorter(): Promise<DefaultSorter> {
+export async function createSorter(sharedInternalDocumentIDs: InternalDocumentIDStore): Promise<DefaultSorter> {
   return {
     create,
     insert,
     remove,
     save,
-    load,
+    load: load.bind(null, sharedInternalDocumentIDs),
     sortBy,
     getSortableProperties,
     getSortablePropertiesWithTypes,
